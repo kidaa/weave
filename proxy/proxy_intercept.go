@@ -70,7 +70,7 @@ func (proxy *Proxy) Intercept(i interceptor, w http.ResponseWriter, r *http.Requ
 }
 
 func doRawStream(w http.ResponseWriter, resp *http.Response, client *httputil.ClientConn) {
-	down, downBuf, up, rem, err := hijack(w, client)
+	down, downBuf, up, remaining, err := hijack(w, client)
 	if err != nil {
 		http.Error(w, "Unable to hijack connection for raw stream mode", http.StatusInternalServerError)
 		return
@@ -95,7 +95,7 @@ func doRawStream(w http.ResponseWriter, resp *http.Response, client *httputil.Cl
 
 	upDone := make(chan struct{})
 	downDone := make(chan struct{})
-	go copyStream(down, io.MultiReader(rem, up), upDone)
+	go copyStream(down, io.MultiReader(remaining, up), upDone)
 	go copyStream(up, downBuf, downDone)
 	<-upDone
 	<-downDone
@@ -115,8 +115,13 @@ func copyStream(dst io.Writer, src io.Reader, done chan struct{}) {
 	}
 }
 
+type writeFlusher interface {
+	io.Writer
+	http.Flusher
+}
+
 func doChunkedResponse(w http.ResponseWriter, resp *http.Response, client *httputil.ClientConn) {
-	wf, ok := w.(http.Flusher)
+	wf, ok := w.(writeFlusher)
 	if !ok {
 		http.Error(w, "Error forwarding chunked response body: flush not available", http.StatusInternalServerError)
 		return
@@ -124,13 +129,13 @@ func doChunkedResponse(w http.ResponseWriter, resp *http.Response, client *httpu
 
 	w.WriteHeader(resp.StatusCode)
 
-	up, rem := client.Hijack()
+	up, remaining := client.Hijack()
 	defer up.Close()
 
 	var err error
-	chunks := NewChunkedReader(io.MultiReader(rem, up))
+	chunks := NewChunkedReader(io.MultiReader(remaining, up))
 	for chunks.Next() && err == nil {
-		_, err = io.Copy(w, chunks.Chunk())
+		_, err = io.Copy(wf, chunks.Chunk())
 		wf.Flush()
 	}
 	if err == nil {
@@ -141,7 +146,7 @@ func doChunkedResponse(w http.ResponseWriter, resp *http.Response, client *httpu
 	}
 }
 
-func hijack(w http.ResponseWriter, client *httputil.ClientConn) (down net.Conn, downBuf *bufio.ReadWriter, up net.Conn, rem io.Reader, err error) {
+func hijack(w http.ResponseWriter, client *httputil.ClientConn) (down net.Conn, downBuf *bufio.ReadWriter, up net.Conn, remaining io.Reader, err error) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		err = errors.New("Unable to cast to Hijack")
@@ -151,6 +156,6 @@ func hijack(w http.ResponseWriter, client *httputil.ClientConn) (down net.Conn, 
 	if err != nil {
 		return
 	}
-	up, rem = client.Hijack()
+	up, remaining = client.Hijack()
 	return
 }

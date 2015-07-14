@@ -3,14 +3,19 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
 	"io/ioutil"
+	"strconv"
 )
 
 const maxLineLength = 4096 // assumed <= bufio.defaultBufSize
 
-var ErrLineTooLong = errors.New("header line too long")
+var (
+	ErrLineTooLong        = errors.New("header line too long")
+	ErrInvalidChunkLength = errors.New("invalid byte in chunk length")
+)
 
 // Unlike net/http/internal.chunkedReader, this has an interface where we can
 // handle individual chunks. The interface is based on database/sql.Rows.
@@ -64,7 +69,7 @@ func (cr *ChunkedReader) Next() bool {
 	// Setup the next chunk
 	if n := cr.beginChunk(); n > 0 {
 		cr.chunk.N = int64(n)
-	} else {
+	} else if cr.err == nil {
 		cr.err = io.EOF
 	}
 	return cr.err == nil
@@ -91,7 +96,10 @@ func (cr *ChunkedReader) beginChunk() (n uint64) {
 	if cr.err != nil {
 		return
 	}
-	n, cr.err = parseHexUint(line)
+	n, cr.err = strconv.ParseUint(string(line), 16, 64)
+	if cr.err != nil {
+		cr.err = ErrInvalidChunkLength
+	}
 	return
 }
 
@@ -113,34 +121,5 @@ func readLine(b *bufio.Reader) (p []byte, err error) {
 	if len(p) >= maxLineLength {
 		return nil, ErrLineTooLong
 	}
-	return trimTrailingWhitespace(p), nil
-}
-
-func trimTrailingWhitespace(b []byte) []byte {
-	for len(b) > 0 && isASCIISpace(b[len(b)-1]) {
-		b = b[:len(b)-1]
-	}
-	return b
-}
-
-func isASCIISpace(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
-}
-
-func parseHexUint(v []byte) (n uint64, err error) {
-	for _, b := range v {
-		n <<= 4
-		switch {
-		case '0' <= b && b <= '9':
-			b = b - '0'
-		case 'a' <= b && b <= 'f':
-			b = b - 'a' + 10
-		case 'A' <= b && b <= 'F':
-			b = b - 'A' + 10
-		default:
-			return 0, errors.New("invalid byte in chunk length")
-		}
-		n |= uint64(b)
-	}
-	return
+	return bytes.TrimRight(p, " \t\n\r"), nil
 }
