@@ -49,6 +49,9 @@ test:
     - $SRCDIR/bin/circleci/do-int-tests:
         parallel: true
         timeout: 300
+    - $SRCDIR/bin/circleci/do-perf-tests:
+        parallel: true
+        timeout: 300
   post:
     - $SRCDIR/bin/circleci/teardown-int-tests:
         parallel: true

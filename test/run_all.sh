@@ -3,8 +3,16 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$DIR/config.sh"
 
-TESTS="${@:-*_test.sh}"
-[ -n "$PERFORMANCE" ] && TESTS="$TESTS $(ls *_perf.sh)"
+
+if [ $# -ne 0 ] ; then
+    TESTS="$@"
+else
+    if [ -n "$PERFORMANCE" ] ; then
+        TESTS="$(ls *_perf.sh 2>/dev/null)"
+    else
+        TESTS="$(ls *_test.sh 2>/dev/null)"
+    fi
+fi
 
 whitely echo Sanity checks
 if ! bash "$DIR/sanity_check.sh"; then
