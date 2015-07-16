@@ -8,7 +8,42 @@ import (
 	"github.com/weaveworks/weave/net/address"
 	weave "github.com/weaveworks/weave/router"
 	"net/http"
+	"strings"
+	"text/template"
 )
+
+// Strip escaped newlines from template
+func escape(template string) string {
+	return strings.Replace(template, "\\\n", "", -1)
+}
+
+var statusTemplate = escape(`\
+          Service: router
+             Name: {{.Router.Name}}
+         NickName: {{.Router.NickName}}
+       Encryption: {{.Router.Encryption}}
+    PeerDiscovery: {{.Router.PeerDiscovery}}
+            Peers: {{len .Router.Peers}}
+             MACs: {{len .Router.MACs}}
+    UnicastRoutes: {{len .Router.Routes.Unicast}}
+  BroadcastRoutes: {{len .Router.Routes.Broadcast}}
+      DirectPeers: {{len .Router.ConnectionMaker.DirectPeers}}
+     Reconnecting: {{len .Router.ConnectionMaker.Reconnects}}
+
+          Service: ipam
+{{if .IPAM.Paxos}}\
+        Consensus: {{.IPAM.Paxos.Consensus}}
+           Quorum: {{.IPAM.Paxos.Quorum}}
+       KnownNodes: {{.IPAM.Paxos.KnownNodes}}
+{{end}}\
+            Range: {{.IPAM.Range}}
+    DefaultSubnet: {{.IPAM.DefaultSubnet}}
+
+          Service: dns
+           Domain: {{.DNS.Domain}}
+             Port: {{.DNS.Port}}
+              TTL: {{.DNS.TTL}}\
+`)
 
 func HandleHTTP(muxRouter *mux.Router,
 	router *weave.Router,
@@ -26,15 +61,21 @@ func HandleHTTP(muxRouter *mux.Router,
 
 	muxRouter.Methods("GET").Path("/status").HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintln(w, "weave router", version)
-			fmt.Fprintln(w, router.Status())
-			if allocator != nil {
-				fmt.Fprintln(w, allocator.String())
-				fmt.Fprintln(w, "Allocator default subnet:", defaultSubnet)
+
+			tmpl, err := template.New("status").Parse(statusTemplate)
+			if err != nil {
+				fmt.Println(err)
+				return
 			}
-			fmt.Fprintln(w, "")
-			fmt.Fprintln(w, dnsserver.String())
-			fmt.Fprintln(w, ns.String())
+
+			status := Status(router, allocator, defaultSubnet, ns, dnsserver)
+
+			err = tmpl.Execute(w, status)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
 		})
 
 }
