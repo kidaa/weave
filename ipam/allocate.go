@@ -26,6 +26,10 @@ func (g *allocate) Try(alloc *Allocator) bool {
 	}
 
 	if addr, found := alloc.lookupOwned(g.ident, g.r); found {
+		// Resurrect a container that we heard had died
+		if _, pending := alloc.dead[g.ident]; pending {
+			delete(alloc.dead, g.ident)
+		}
 		g.resultChan <- allocateResult{addr, nil}
 		return true
 	}
