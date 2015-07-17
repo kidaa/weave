@@ -53,6 +53,7 @@ weave dns-lookup    <unqualified_name>
 weave expose        [<addr> ...] [-h <fqdn>]
 weave hide          [<addr> ...]
 weave ps            [<container_id> ...]
+weave inspect
 weave status
 weave env
 weave config
@@ -1277,6 +1278,9 @@ case "$COMMAND" in
     forget)
         [ $# -gt 0 ] || usage
         call_weave POST /forget -d $(peer_args "$@")
+        ;;
+    inspect)
+        call_weave GET /status -H 'Accept: application/json'
         ;;
     status)
         res=0

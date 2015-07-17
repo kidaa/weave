@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/gorilla/mux"
 	"github.com/weaveworks/weave/ipam"
@@ -54,7 +55,8 @@ func HandleHTTP(muxRouter *mux.Router,
 
 	muxRouter.Methods("GET").Path("/status").Headers("Accept", "application/json").HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			json, _ := router.StatusJSON(version)
+			status := Status(router, allocator, defaultSubnet, ns, dnsserver)
+			json, _ := json.MarshalIndent(status, "", "    ")
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(json)
 		})
