@@ -3,6 +3,9 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$DIR/config.sh"
 
+TESTS="${@:-*_test.sh}"
+[ -n "$PERFORMANCE" ] && TESTS="$TESTS $(ls *_perf.sh)"
+
 whitely echo Sanity checks
 if ! bash "$DIR/sanity_check.sh"; then
     whitely echo ...failed
@@ -24,8 +27,6 @@ check_test_status() {
 }
 # Overwrite assert.sh _assert_cleanup trap with our own
 trap check_test_status EXIT
-
-TESTS="${@:-*_test.sh}"
 
 # If running on circle, use the scheduler to work out what tests to run
 if [ -n "$CIRCLECI" -a -z "$NO_SCHEDULER" ]; then
