@@ -1284,7 +1284,8 @@ case "$COMMAND" in
         echo
         if check_running $PROXY_CONTAINER_NAME 2>/dev/null ; then
             echo
-            echo "weave proxy is running"
+            echo "          Service: proxy"
+            echo "          Address: $(proxy_addr)"
         fi
         [ $res -eq 0 ]
         ;;
