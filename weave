@@ -1284,7 +1284,12 @@ case "$COMMAND" in
         ;;
     status)
         res=0
-        call_weave GET /status || res=1
+        STATUS_URL="/status"
+        while [ $# -gt 0 ] ; do
+            STATUS_URL="$STATUS_URL/$1"
+            shift
+        done
+        call_weave GET $STATUS_URL || res=1
         echo
         if check_running $PROXY_CONTAINER_NAME 2>/dev/null ; then
             echo
