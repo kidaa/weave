@@ -1109,7 +1109,8 @@ launch_proxy() {
     # when launching the weaveproxy container.
     docker_client_args $DOCKER_CLIENT_ARGS
     proxy_args "$@"
-    PROXY_CONTAINER=$(docker run --privileged -d --name=$PROXY_CONTAINER_NAME --net=host \
+    PROXY_CONTAINER=$(docker run --privileged -d --name=$PROXY_CONTAINER_NAME \
+         --pid=host --net=host \
         $PROXY_VOLUMES \
         -v /var/run:/var/run \
         -v /proc:/hostproc \

@@ -229,7 +229,7 @@ func (proxy *Proxy) attach(container *docker.Container) error {
 	}
 
 	// send SIGUSR2 to let weavewait know network is ready
-	return proxy.client.KillContainer(docker.KillContainerOptions{ID: container.ID, Signal: docker.SIGUSR2})
+	return syscall.Kill(container.State.Pid, syscall.SIGUSR2)
 }
 
 func (proxy *Proxy) weaveCIDRsFromConfig(config *docker.Config, hostConfig *docker.HostConfig) ([]string, error) {

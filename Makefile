@@ -30,7 +30,7 @@ IMAGES=$(WEAVER_IMAGE) $(WEAVEEXEC_IMAGE)
 
 WEAVE_EXPORT=weave.tar
 
-WEAVEEXEC_DOCKER_VERSION=1.3.1
+WEAVEEXEC_DOCKER_VERSION=1.5.0
 DOCKER_DISTRIB=prog/weaveexec/docker-$(WEAVEEXEC_DOCKER_VERSION).tgz
 DOCKER_DISTRIB_URL=https://get.docker.com/builds/Linux/x86_64/docker-$(WEAVEEXEC_DOCKER_VERSION).tgz
 COVERAGE_MODULES=$(shell go list -f '{{join .Deps "\n"}}' ./prog/weaver | grep "weaveworks" | paste -s -d,)
