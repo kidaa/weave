@@ -82,5 +82,6 @@ func main() {
 		Log.Fatalf("Could not start proxy: %s", err)
 	}
 
+	p.AttachExistingContainers()
 	p.ListenAndServe()
 }
