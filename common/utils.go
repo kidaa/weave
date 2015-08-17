@@ -1,5 +1,9 @@
 package common
 
+import (
+	"strings"
+)
+
 // Assert test is true, panic otherwise
 func Assert(test bool) {
 	if !test {
@@ -7,9 +11,10 @@ func Assert(test bool) {
 	}
 }
 
-func OnOff(b bool) string {
-	if b {
-		return "on"
+func ErrorMessages(errors []error) string {
+	var result []string
+	for _, err := range errors {
+		result = append(result, err.Error())
 	}
-	return "off"
+	return strings.Join(result, "\n")
 }

@@ -28,9 +28,8 @@ var (
 	containerStartRegexp  = regexp.MustCompile("^(/v[0-9\\.]*)?/containers/[^/]*/(re)?start$")
 	execCreateRegexp      = regexp.MustCompile("^(/v[0-9\\.]*)?/containers/[^/]*/exec$")
 
-	ErrInvalidNetworkMode = errors.New("--net option")
-	ErrWeaveCIDRNone      = errors.New("WEAVE_CIDR=none")
-	ErrNoDefaultIPAM      = errors.New("--no-default-ipam option")
+	ErrWeaveCIDRNone = errors.New("the container was created with the '-e WEAVE_CIDR=none' option")
+	ErrNoDefaultIPAM = errors.New("the container was created without specifying an IP address with '-e WEAVE_CIDR=...' and the proxy was started with the '--no-default-ipalloc' option")
 )
 
 type Config struct {
@@ -50,6 +49,7 @@ type Proxy struct {
 	client              *docker.Client
 	dockerBridgeIP      string
 	hostnameMatchRegexp *regexp.Regexp
+	weaveWaitVolume     string
 }
 
 func NewProxy(c Config) (*Proxy, error) {
@@ -59,7 +59,12 @@ func NewProxy(c Config) (*Proxy, error) {
 		Log.Fatalf("Could not configure tls for proxy: %s", err)
 	}
 
-	client, err := docker.NewClient(dockerSockUnix)
+	// We pin the protocol version to 1.15 (which corresponds to
+	// Docker 1.3.x; the earliest version supported by weave) in order
+	// to insulate ourselves from breaking changes to the API, as
+	// happened in 1.20 (Docker 1.8.0) when the presentation of
+	// volumes changed in `inspect`.
+	client, err := docker.NewVersionedClient(dockerSockUnix, "1.15")
 	if err != nil {
 		return nil, err
 	}
@@ -79,11 +84,34 @@ func NewProxy(c Config) (*Proxy, error) {
 		return nil, err
 	}
 
+	if err = p.findWeaveWaitVolume(); err != nil {
+		return nil, err
+	}
+
 	return p, nil
 }
 
 func (proxy *Proxy) Dial() (net.Conn, error) {
 	return net.Dial("unix", dockerSock)
+}
+
+func (proxy *Proxy) findWeaveWaitVolume() error {
+	container, err := proxy.client.InspectContainer("weaveproxy")
+	if err != nil {
+		return fmt.Errorf("Could not find the weavewait volume: %s", err)
+	}
+
+	if container.Volumes == nil {
+		return fmt.Errorf("Could not find the weavewait volume")
+	}
+
+	volume, ok := container.Volumes["/w"]
+	if !ok {
+		return fmt.Errorf("Could not find the weavewait volume")
+	}
+
+	proxy.weaveWaitVolume = volume
+	return nil
 }
 
 func (proxy *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -197,10 +225,12 @@ func (proxy *Proxy) listen(protoAndAddr string) (net.Listener, string, error) {
 }
 
 func (proxy *Proxy) weaveCIDRsFromConfig(config *docker.Config, hostConfig *docker.HostConfig) ([]string, error) {
-	if hostConfig != nil &&
-		hostConfig.NetworkMode != "" &&
-		hostConfig.NetworkMode != "bridge" {
-		return nil, ErrInvalidNetworkMode
+	netMode := ""
+	if hostConfig != nil {
+		netMode = hostConfig.NetworkMode
+	}
+	if netMode == "host" || strings.HasPrefix(netMode, "container:") {
+		return nil, fmt.Errorf("the container was created with the '--net=%s'", netMode)
 	}
 	for _, e := range config.Env {
 		if strings.HasPrefix(e, "WEAVE_CIDR=") {

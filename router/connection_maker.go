@@ -1,13 +1,10 @@
 package router
 
 import (
-	"bytes"
 	"fmt"
 	"math/rand"
 	"net"
 	"time"
-
-	. "github.com/weaveworks/weave/common"
 )
 
 const (
@@ -104,58 +101,6 @@ func (cm *ConnectionMaker) ConnectionTerminated(address string, err error) {
 
 func (cm *ConnectionMaker) Refresh() {
 	cm.actionChan <- func() bool { return true }
-}
-
-func (cm *ConnectionMaker) Status() ConnectionMakerStatus {
-	// We need to Refresh first in order to clear out any 'attempting'
-	// connections from cm.targets that have been established since
-	// the last run of cm.checkStateAndAttemptConnections. These
-	// entries are harmless but do represent stale state that we do
-	// not want to report.
-	cm.Refresh()
-	resultChan := make(chan ConnectionMakerStatus, 0)
-	cm.actionChan <- func() bool {
-		status := ConnectionMakerStatus{
-			DirectPeers: []string{},
-			Reconnects:  make(map[string]Target),
-		}
-		for peer := range cm.directPeers {
-			status.DirectPeers = append(status.DirectPeers, peer)
-		}
-
-		for address, target := range cm.targets {
-			status.Reconnects[address] = *target
-		}
-		resultChan <- status
-		return false
-	}
-	return <-resultChan
-}
-
-type ConnectionMakerStatus struct {
-	DirectPeers []string
-	Reconnects  map[string]Target
-}
-
-func (status ConnectionMakerStatus) String() string {
-	var buf bytes.Buffer
-	fmt.Fprint(&buf, "Direct Peers:")
-	for _, peer := range status.DirectPeers {
-		fmt.Fprintf(&buf, " %s", peer)
-	}
-	fmt.Fprintln(&buf, "\nReconnects:")
-	for address, target := range status.Reconnects {
-		fmt.Fprintf(&buf, "->[%s]", address)
-		if target.lastError != nil {
-			fmt.Fprintf(&buf, " (%s)", target.lastError)
-		}
-		if target.attempting {
-			fmt.Fprintf(&buf, " trying since %v\n", target.tryAfter)
-		} else {
-			fmt.Fprintf(&buf, " next try at %v\n", target.tryAfter)
-		}
-	}
-	return buf.String()
 }
 
 func (cm *ConnectionMaker) queryLoop(actionChan <-chan ConnectionMakerAction) {
@@ -299,9 +244,9 @@ func (cm *ConnectionMaker) connectToTargets(validTarget map[string]struct{}, dir
 }
 
 func (cm *ConnectionMaker) attemptConnection(address string, acceptNewPeer bool) {
-	Log.Printf("->[%s] attempting connection", address)
+	log.Printf("->[%s] attempting connection", address)
 	if err := cm.ourself.CreateConnection(address, acceptNewPeer); err != nil {
-		Log.Errorf("->[%s] error during connection attempt: %v", address, err)
+		log.Errorf("->[%s] error during connection attempt: %v", address, err)
 		cm.ConnectionTerminated(address, err)
 	}
 }

@@ -15,8 +15,9 @@ SIGPROXY_EXE=prog/sigproxy/sigproxy
 WEAVEWAIT_EXE=prog/weavewait/weavewait
 NETCHECK_EXE=prog/netcheck/netcheck
 COVER_EXE=testing/cover/cover
+RUNNER_EXE=testing/runner/runner
 
-EXES=$(WEAVER_EXE) $(SIGPROXY_EXE) $(WEAVEPROXY_EXE) $(WEAVEWAIT_EXE) $(NETCHECK_EXE) $(COVER_EXE)
+EXES=$(WEAVER_EXE) $(SIGPROXY_EXE) $(WEAVEPROXY_EXE) $(WEAVEWAIT_EXE) $(NETCHECK_EXE) $(COVER_EXE) $(RUNNER_EXE)
 
 WEAVER_UPTODATE=.weaver.uptodate
 WEAVEEXEC_UPTODATE=.weaveexec.uptodate
@@ -33,7 +34,6 @@ WEAVE_EXPORT=weave.tar
 WEAVEEXEC_DOCKER_VERSION=1.3.1
 DOCKER_DISTRIB=prog/weaveexec/docker-$(WEAVEEXEC_DOCKER_VERSION).tgz
 DOCKER_DISTRIB_URL=https://get.docker.com/builds/Linux/x86_64/docker-$(WEAVEEXEC_DOCKER_VERSION).tgz
-COVERAGE_MODULES=$(shell go list -f '{{join .Deps "\n"}}' ./prog/weaver | grep "weaveworks" | paste -s -d,)
 NETGO_CHECK=@strings $@ | grep cgo_stub\\\.go >/dev/null || { \
 	rm $@; \
 	echo "\nYour go standard library was built without the 'netgo' build tag."; \
@@ -42,31 +42,32 @@ NETGO_CHECK=@strings $@ | grep cgo_stub\\\.go >/dev/null || { \
 	echo "    sudo go install -tags netgo std"; \
 	false; \
 }
+BUILD_FLAGS=-ldflags "-extldflags \"-static\" -X main.version $(WEAVE_VERSION)" -tags netgo
 
-all: $(WEAVE_EXPORT) $(COVER_EXE)
+all: $(WEAVE_EXPORT) $(COVER_EXE) $(RUNNER_EXE)
 
 travis: $(EXES)
 
 update:
 	go get -u -f -v -tags -netgo $(addprefix ./,$(dir $(EXES)))
 
-$(WEAVER_EXE): common/*.go common/*/*.go net/*.go
+$(WEAVER_EXE) $(WEAVEPROXY_EXE): common/*.go common/*/*.go net/*.go
 ifeq ($(COVERAGE),true)
+	$(eval COVERAGE_MODULES := $(shell (go list ./$(@D); go list -f '{{join .Deps "\n"}}' ./$(@D) | grep "weaveworks") | paste -s -d,))
 	go get -t -tags netgo ./$(@D)
-	go test -c -o ./$@ -ldflags "-extldflags \"-static\" -X main.version $(WEAVE_VERSION)" \
-		-tags netgo -v -covermode=atomic -coverpkg $(COVERAGE_MODULES) ./$(@D)/
+	go test -c -o ./$@ $(BUILD_FLAGS) -v -covermode=atomic -coverpkg $(COVERAGE_MODULES) ./$(@D)/
 else
 	go get -tags netgo ./$(@D)
-	go build -ldflags "-extldflags \"-static\" -X main.version $(WEAVE_VERSION)" -tags netgo -o $@ ./$(@D)
+	go build $(BUILD_FLAGS) -o $@ ./$(@D)
 endif
 	$(NETGO_CHECK)
 
-$(WEAVEPROXY_EXE) $(NETCHECK_EXE): common/*.go common/*/*.go net/*.go
+$(NETCHECK_EXE): common/*.go common/*/*.go net/*.go
 	go get -tags netgo ./$(@D)
-	go build -ldflags "-extldflags \"-static\" -X main.version $(WEAVE_VERSION)" -tags netgo -o $@ ./$(@D)
+	go build $(BUILD_FLAGS) -o $@ ./$(@D)
 	$(NETGO_CHECK)
 
-$(WEAVER_EXE): router/*.go ipam/*.go ipam/*/*.go nameserver/*.go prog/weaver/main.go
+$(WEAVER_EXE): router/*.go ipam/*.go ipam/*/*.go nameserver/*.go prog/weaver/*.go
 $(WEAVEPROXY_EXE): proxy/*.go prog/weaveproxy/main.go
 $(NETCHECK_EXE): prog/netcheck/netcheck.go
 
@@ -75,8 +76,9 @@ $(NETCHECK_EXE): prog/netcheck/netcheck.go
 $(SIGPROXY_EXE): prog/sigproxy/main.go
 $(WEAVEWAIT_EXE): prog/weavewait/main.go
 $(COVER_EXE): testing/cover/cover.go
+$(RUNNER_EXE): testing/runner/runner.go
 
-$(WEAVEWAIT_EXE) $(SIGPROXY_EXE) $(COVER_EXE):
+$(WEAVEWAIT_EXE) $(SIGPROXY_EXE) $(COVER_EXE) $(RUNNER_EXE):
 	go get ./$(@D)
 	go build -o $@ ./$(@D)
 

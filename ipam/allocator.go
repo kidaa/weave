@@ -33,8 +33,6 @@ type operation interface {
 
 	Cancel()
 
-	String() string
-
 	// Does this operation pertain to the given container id?
 	// Used for tidying up pending operations when containers die.
 	ForContainer(ident string) bool
@@ -95,7 +93,6 @@ func (alloc *Allocator) doOperation(op operation, ops *[]operation) {
 			op.Cancel()
 			return
 		}
-		alloc.establishRing()
 		if !op.Try(alloc) {
 			*ops = append(*ops, op)
 		}
@@ -168,7 +165,7 @@ func (alloc *Allocator) spaceRequestDenied(sender router.PeerName, r address.Ran
 	for i := 0; i < len(alloc.pendingClaims); {
 		claim := alloc.pendingClaims[i].(*claim)
 		if r.Contains(claim.addr) {
-			claim.DeniedBy(alloc, sender)
+			claim.deniedBy(alloc, sender)
 			alloc.pendingClaims = append(alloc.pendingClaims[:i], alloc.pendingClaims[i+1:]...)
 			continue
 		}
@@ -215,9 +212,9 @@ func (alloc *Allocator) Lookup(ident string, r address.Range) (address.Address, 
 }
 
 // Claim an address that we think we should own (Sync)
-func (alloc *Allocator) Claim(ident string, addr address.Address) error {
+func (alloc *Allocator) Claim(ident string, addr address.Address, noErrorOnUnknown bool) error {
 	resultChan := make(chan error)
-	op := &claim{resultChan: resultChan, ident: ident, addr: addr}
+	op := &claim{resultChan: resultChan, ident: ident, addr: addr, noErrorOnUnknown: noErrorOnUnknown}
 	alloc.doOperation(op, &alloc.pendingClaims)
 	return <-resultChan
 }
@@ -274,15 +271,6 @@ func (alloc *Allocator) Free(ident string, addrToFree address.Address) error {
 		errChan <- fmt.Errorf("Free: address %s not found for %s", addrToFree, ident)
 	}
 	return <-errChan
-}
-
-// Sync.
-func (alloc *Allocator) String() string {
-	resultChan := make(chan string)
-	alloc.actionChan <- func() {
-		resultChan <- alloc.string()
-	}
-	return <-resultChan
 }
 
 // Shutdown (Sync)
@@ -493,30 +481,6 @@ func (alloc *Allocator) actorLoop(actionChan <-chan func()) {
 }
 
 // Helper functions
-
-func (alloc *Allocator) string() string {
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "Allocator range %s", alloc.universe)
-
-	if alloc.ring.Empty() {
-		if alloc.paxosTicker != nil {
-			fmt.Fprintf(&buf, " awaiting consensus: %s", alloc.paxos.String())
-		}
-	} else {
-		fmt.Fprint(&buf, "\nOwned Ranges:")
-		alloc.ring.FprintWithNicknames(&buf, alloc.nicknames)
-	}
-	if len(alloc.pendingAllocates)+len(alloc.pendingClaims) > 0 {
-		fmt.Fprintf(&buf, "\nPending requests:")
-		for _, op := range alloc.pendingAllocates {
-			fmt.Fprintf(&buf, "\n  %s", op.String())
-		}
-		for _, op := range alloc.pendingClaims {
-			fmt.Fprintf(&buf, "\n  %s", op.String())
-		}
-	}
-	return buf.String()
-}
 
 // Ensure we are making progress towards an established ring
 func (alloc *Allocator) establishRing() {

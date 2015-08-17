@@ -9,17 +9,20 @@ import (
 )
 
 type claim struct {
-	resultChan chan<- error
-	ident      string
-	addr       address.Address
+	resultChan       chan<- error
+	ident            string
+	addr             address.Address
+	noErrorOnUnknown bool
 }
 
+// Send an error (or nil for success) back to caller listening on resultChan
 func (c *claim) sendResult(result error) {
 	// Make sure we only send a result once, since listener stops listening after that
 	if c.resultChan != nil {
 		c.resultChan <- result
 		close(c.resultChan)
 		c.resultChan = nil
+		return
 	}
 	if result != nil {
 		common.Log.Errorln("[allocator] " + result.Error())
@@ -35,20 +38,30 @@ func (c *claim) Try(alloc *Allocator) bool {
 		return true
 	}
 
+	alloc.establishRing()
+
 	switch owner := alloc.ring.Owner(c.addr); owner {
 	case alloc.ourName:
 		// success
 	case router.UnknownPeerName:
 		// If our ring doesn't know, it must be empty.
-		alloc.infof("Claim %s for %s: address allocator still initializing; will try later.", c.addr, c.ident)
-		c.sendResult(nil) // don't make the caller wait
+		if c.noErrorOnUnknown {
+			alloc.infof("Claim %s for %s: address allocator still initializing; will try later.", c.addr, c.ident)
+			c.sendResult(nil)
+		} else {
+			c.sendResult(fmt.Errorf("%s is in the range %s, but the allocator is not initialized yet", c.addr, alloc.universe.AsCIDRString()))
+		}
 		return false
 	default:
 		alloc.debugf("requesting address %s from other peer %s", c.addr, owner)
 		err := alloc.sendSpaceRequest(owner, address.NewRange(c.addr, 1))
-		if err != nil { // can't speak to owner right now; figure it out later
-			alloc.infof("Claim %s for %s: %s; will try later.", c.addr, c.ident, err)
-			c.sendResult(nil)
+		if err != nil { // can't speak to owner right now
+			if c.noErrorOnUnknown {
+				alloc.infof("Claim %s for %s: %s; will try later.", c.addr, c.ident, err)
+				c.sendResult(nil)
+			} else { // just tell the user they can't do this.
+				c.deniedBy(alloc, owner)
+			}
 		}
 		return false
 	}
@@ -73,7 +86,7 @@ func (c *claim) Try(alloc *Allocator) bool {
 	return true
 }
 
-func (c *claim) DeniedBy(alloc *Allocator, owner router.PeerName) {
+func (c *claim) deniedBy(alloc *Allocator, owner router.PeerName) {
 	name, found := alloc.nicknames[owner]
 	if found {
 		name = " (" + name + ")"
@@ -83,10 +96,6 @@ func (c *claim) DeniedBy(alloc *Allocator, owner router.PeerName) {
 
 func (c *claim) Cancel() {
 	c.sendResult(fmt.Errorf("Operation cancelled."))
-}
-
-func (c *claim) String() string {
-	return fmt.Sprintf("Claim %s -> %s", c.ident, c.addr.String())
 }
 
 func (c *claim) ForContainer(ident string) bool {

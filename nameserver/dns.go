@@ -21,16 +21,16 @@ const (
 	udpBuffSize      = uint16(4096)
 	minUDPSize       = 512
 
-	DefaultPort          = 53
+	DefaultListenAddress = "0.0.0.0:53"
 	DefaultTTL           = 1
 	DefaultClientTimeout = 5 * time.Second
 )
 
 type DNSServer struct {
-	ns     *Nameserver
-	domain string
-	ttl    uint32
-	port   int
+	ns      *Nameserver
+	domain  string
+	ttl     uint32
+	address string
 
 	servers   []*dns.Server
 	upstream  *dns.ClientConfig
@@ -38,14 +38,13 @@ type DNSServer struct {
 	udpClient *dns.Client
 }
 
-func NewDNSServer(ns *Nameserver, domain string, port int, ttl uint32,
-	clientTimeout time.Duration) (*DNSServer, error) {
+func NewDNSServer(ns *Nameserver, domain string, address string, ttl uint32, clientTimeout time.Duration) (*DNSServer, error) {
 
 	s := &DNSServer{
 		ns:        ns,
 		domain:    dns.Fqdn(domain),
 		ttl:       ttl,
-		port:      port,
+		address:   address,
 		tcpClient: &dns.Client{Net: "tcp", ReadTimeout: clientTimeout},
 		udpClient: &dns.Client{Net: "udp", ReadTimeout: clientTimeout, UDPSize: udpBuffSize},
 	}
@@ -54,26 +53,26 @@ func NewDNSServer(ns *Nameserver, domain string, port int, ttl uint32,
 		return nil, err
 	}
 
-	err = s.listen(port)
+	err = s.listen(address)
 	return s, err
 }
 
 func (d *DNSServer) String() string {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "WeaveDNS (%s)\n", d.ns.ourName)
-	fmt.Fprintf(&buf, "  listening on port %d, for domain %s\n", d.port, d.domain)
+	fmt.Fprintf(&buf, "  listening on %s, for domain %s\n", d.address, d.domain)
 	fmt.Fprintf(&buf, "  response ttl %d\n", d.ttl)
 	return buf.String()
 }
 
-func (d *DNSServer) listen(port int) error {
-	udpListener, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
+func (d *DNSServer) listen(address string) error {
+	udpListener, err := net.ListenPacket("udp", address)
 	if err != nil {
 		return err
 	}
 	udpServer := &dns.Server{PacketConn: udpListener, Handler: d.createMux(d.udpClient, minUDPSize)}
 
-	tcpListener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	tcpListener, err := net.Listen("tcp", address)
 	if err != nil {
 		udpServer.Shutdown()
 		return err
@@ -135,6 +134,10 @@ func (d *DNSServer) handleLocal(defaultMaxResponseSize int) func(dns.ResponseWri
 		}
 
 		addrs := d.ns.Lookup(hostname)
+		if len(addrs) == 0 {
+			d.errorResponse(req, dns.RcodeNameError, w)
+			return
+		}
 
 		response := dns.Msg{}
 		response.RecursionAvailable = true
@@ -234,12 +237,11 @@ func (d *DNSServer) handleRecursive(client *dns.Client, defaultMaxResponseSize i
 				d.ns.debugf("error trying %s: %v", server, err)
 				continue
 			}
-			if response.Rcode != dns.RcodeSuccess && !response.Authoritative {
-				d.ns.debugf("non-authoritative error trying %s: %v", server, response.Rcode)
-				continue
-			}
 			d.ns.debugf("response: %+v", response)
-			response.SetReply(req)
+			response.Id = req.Id
+			if response.Len() > getMaxResponseSize(req, defaultMaxResponseSize) {
+				response.Compress = true
+			}
 			if err := w.WriteMsg(response); err != nil {
 				d.ns.infof("error responding: %v", err)
 			}

@@ -30,6 +30,7 @@ usage() {
 Usage:
 
 weave setup
+weave version
 weave launch        [--password <password>] [--nickname <nickname>]
                       [--ipalloc-range <cidr> [--ipalloc-default-subnet <cidr>]]
                       [--no-discovery] [--init-peer-count <count>] <peer> ...
@@ -40,8 +41,12 @@ weave launch-proxy  [-H <endpoint>] [--with-dns | --without-dns]
                       [--no-default-ipalloc] [--no-rewrite-hosts]
                       [--hostname-match <regexp>]
                       [--hostname-replacement <replacement>]
+weave env
+weave config
 weave connect       [--replace] [<peer> ...]
 weave forget        <peer> ...
+weave status        [targets | connections | peers | dns]
+weave report        [-f <format>]
 weave run           [--with-dns | --without-dns] [<addr> ...]
                       <docker run args> ...
 weave start         [<addr> ...] <container_id>
@@ -53,10 +58,6 @@ weave dns-lookup    <unqualified_name>
 weave expose        [<addr> ...] [-h <fqdn>]
 weave hide          [<addr> ...]
 weave ps            [<container_id> ...]
-weave status
-weave env
-weave config
-weave version
 weave stop
 weave stop-router
 weave stop-proxy
@@ -105,6 +106,22 @@ check_docker_version() {
     if [ "$DOCKER_VERSION" = "1.3.0" ] ; then
         echo "You are running Docker version $DOCKER_VERSION, which contains a bug that prevents weave from working properly. Please upgrade." >&2
         exit 1
+    fi
+}
+
+enforce_docker_bridge_addr_assign_type() {
+    if ! ADDR_ASSIGN_TYPE=$(cat /sys/class/net/$DOCKER_BRIDGE/addr_assign_type 2>/dev/null) ; then
+        echo "Could not determine address assignment type of $DOCKER_BRIDGE" >&2
+        return
+    fi
+    # From include/uapi/linux/netdevice.h
+    # #define NET_ADDR_PERM       0   /* address is permanent (default) */
+    # #define NET_ADDR_RANDOM     1   /* address is generated randomly */
+    # #define NET_ADDR_STOLEN     2   /* address is stolen from other device */
+    # #define NET_ADDR_SET        3   /* address is set using dev_set_mac_address() */
+    if [ $ADDR_ASSIGN_TYPE != 3 ] ; then
+        echo "Setting $DOCKER_BRIDGE MAC (mitigate https://github.com/docker/docker/issues/14908)" >&2
+        ip link set dev $DOCKER_BRIDGE address $(random_mac) || true
     fi
 }
 
@@ -157,7 +174,7 @@ if [ "$1" = "run" ] ; then
     shift $(dns_arg_count "$@")
     collect_cidr_args "$@"
     shift $CIDR_ARG_COUNT
-    CONTAINER=$(docker $DOCKER_CLIENT_ARGS run $DNS_ARGS -d "$@")
+    CONTAINER=$(docker $DOCKER_CLIENT_ARGS run -e WEAVE_CIDR=none $DNS_ARGS -d "$@")
     exec_remote attach $CIDR_ARGS --or-die $CONTAINER >/dev/null
     echo $CONTAINER
     exit 0
@@ -183,7 +200,7 @@ PROXY_PORT=12375
 PROXY_CONTAINER_NAME=weaveproxy
 COVERAGE_ARGS=""
 if [ -n "$COVERAGE" ] ; then
-    COVERAGE_ARGS="-test.coverprofile=/home/weave/cover.router.prof --"
+    COVERAGE_ARGS="-test.coverprofile=/home/weave/cover.prof --"
 fi
 
 ######################################################################
@@ -417,7 +434,7 @@ ask_version() {
             fi
     fi
     VERSION_COVERAGE_ARGS=""
-    if [ "$1" = "$CONTAINER_NAME" ] ; then
+    if [ "$1" = "$CONTAINER_NAME" ] || [ "$1" == "$PROXY_CONTAINER_NAME"]  ; then
         VERSION_COVERAGE_ARGS="$COVERAGE_ARGS"
     fi
     [ -n "$DOCKERIMAGE" ] && docker run --rm -e WEAVE_CIDR=none $DOCKERIMAGE $VERSION_COVERAGE_ARGS --version
@@ -465,7 +482,9 @@ attach() {
         netnsenter ip route add 224.0.0.0/4 dev $CONTAINER_IFNAME
     fi
 
-    arp_update $CONTAINER_IFNAME $1 "netnsenter"
+    for ADDR in "$@" ; do
+        arp_update $CONTAINER_IFNAME $ADDR "netnsenter"
+    done
 }
 
 detach() {
@@ -812,10 +831,10 @@ delete_dns_fqdn() {
 
 # Claim addresses for a container in IPAM.  Expects to be called from
 # with_container_addresses.
-ipam_claim() {
+ipam_reclaim() {
     for CIDR in $3 ; do
         # NB: CONTAINER_IP is the IP of the weave container; it is set by wait_for_status.
-        http_call_ip $CONTAINER_IP $HTTP_PORT PUT /ip/$1/${CIDR%/*}
+        http_call_ip $CONTAINER_IP $HTTP_PORT PUT /ip/$1/${CIDR%/*}?noErrorOnUnknown=true
     done
 }
 
@@ -862,6 +881,9 @@ ipam_cidrs() {
         else
             # This is a plain IP address; warn if it clashes but carry on
             command_exists netcheck && netcheck --ignore-iface=$BRIDGE $1 || true
+            if container_ip $CONTAINER_NAME 2>/dev/null ; then
+                http_call_ip $CONTAINER_IP $HTTP_PORT PUT /ip/$CONTAINER_ID/${1%/*} >&2
+            fi
             ALL_CIDRS="$ALL_CIDRS $1"
         fi
         shift 1
@@ -910,7 +932,7 @@ docker_client_args() {
 # TODO: Handle relative paths for args
 # TODO: Handle args with spaces
 tls_arg() {
-    PROXY_VOLUMES="$PROXY_VOLUMES -v $2:/home/weave/tls/$3.pem"
+    PROXY_VOLUMES="$PROXY_VOLUMES -v $2:/home/weave/tls/$3.pem:ro"
     PROXY_ARGS="$PROXY_ARGS $1 /home/weave/tls/$3.pem"
 }
 
@@ -1010,6 +1032,7 @@ common_launch_args() {
 }
 
 launch_router() {
+    enforce_docker_bridge_addr_assign_type
     create_bridge
     docker_bridge_ip
     # We set the router name to the bridge mac since that is
@@ -1073,9 +1096,14 @@ launch_router() {
     if [ -z "$IPRANGE_SPECIFIED" ] ; then
         IPRANGE="10.32.0.0/12"
         if command_exists netcheck && ! netcheck --ignore-iface=$BRIDGE $IPRANGE ; then
-            echo "Default --ipalloc-range $IPRANGE overlaps with existing route on host." >&2
-            echo "Please pick another range and set it on all hosts." >&2
+                echo "ERROR: Default --ipalloc-range $IPRANGE overlaps with existing route on host." >&2
+                echo "You must pick another range and set it on all hosts." >&2
             exit 1
+            fi
+        else
+            if command_exists netcheck && ! netcheck --ignore-iface=$BRIDGE $IPRANGE ; then
+                echo "WARNING: Specified --ipalloc-range $IPRANGE overlaps with existing route on host." >&2
+                echo "Unless this is deliberate, you must pick another range and set it on all hosts." >&2
         fi
     fi
     # Set WEAVE_DOCKER_ARGS in the environment in order to supply
@@ -1091,7 +1119,7 @@ launch_router() {
     wait_for_status $CONTAINER_NAME $HTTP_PORT
     if [ -n "$IPRANGE" ] ; then
         # Tell the newly-started weave IP allocator about existing weave IPs
-        with_container_addresses ipam_claim weave:expose $(docker ps -q --no-trunc)
+        with_container_addresses ipam_reclaim weave:expose $(docker ps -q --no-trunc)
     fi
     if [ -n "$DNS_PORT_MAPPING" ] ; then
         # Tell the newly-started weaveDNS about existing weave IPs
@@ -1109,15 +1137,21 @@ launch_proxy() {
     # when launching the weaveproxy container.
     docker_client_args $DOCKER_CLIENT_ARGS
     proxy_args "$@"
+    HOSTS_PATH=$(docker run --rm \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      --entrypoint /bin/sh \
+      $EXEC_IMAGE -c 'docker inspect -f {{.HostsPath}} $(hostname)')
+    CONTAINERS_PATH="$(dirname $(dirname "$HOSTS_PATH"))"
     PROXY_CONTAINER=$(docker run --privileged -d --name=$PROXY_CONTAINER_NAME --net=host \
         $PROXY_VOLUMES \
+        -v "$CONTAINERS_PATH":"$CONTAINERS_PATH" \
         -v /var/run:/var/run \
         -v /proc:/hostproc \
         -e PROCFS=/hostproc \
         -e WEAVE_CIDR=none \
         -e DOCKER_BRIDGE \
         --entrypoint=/home/weave/weaveproxy \
-        $WEAVEPROXY_DOCKER_ARGS $EXEC_IMAGE $PROXY_ARGS)
+        $WEAVEPROXY_DOCKER_ARGS $EXEC_IMAGE $COVERAGE_ARGS $PROXY_ARGS)
     wait_for_log $PROXY_CONTAINER_NAME "proxy listening"
 }
 
@@ -1228,6 +1262,21 @@ case "$COMMAND" in
             docker pull $img
         done
         ;;
+    version)
+        [ $# -eq 0 ] || usage
+        echo weave script $SCRIPT_VERSION
+        ask_version $CONTAINER_NAME $IMAGE || true
+        if ! EXEC_IMAGE_ID=$(docker inspect --format='{{.Id}}' $EXEC_IMAGE 2>/dev/null) ; then
+            echo "Unable to find $EXEC_IMAGE image." >&2
+        else
+            EXEC_VERSION=$(docker images --no-trunc | grep $EXEC_IMAGE_ID | grep -v latest | tr -s ' ' | cut -d ' ' -f 2 | tr "\n" ' ')
+            if [ -n "$EXEC_VERSION" ] ; then
+                echo "weave exec $EXEC_VERSION"
+            else
+                echo "weave exec (unreleased version)"
+            fi
+        fi
+        ;;
     # intentionally undocumented since it assumes knowledge of weave
     # internals
     create-bridge)
@@ -1275,31 +1324,27 @@ case "$COMMAND" in
         ;;
     status)
         res=0
-        call_weave GET /status || res=1
-        echo
-        if check_running $PROXY_CONTAINER_NAME 2>/dev/null ; then
+        OMIT_PROXY=
+        STATUS_URL="/status"
+        while [ $# -gt 0 ] ; do
+            OMIT_PROXY=1
+            STATUS_URL="$STATUS_URL/$1"
+            shift
+        done
+        call_weave GET $STATUS_URL || res=1
+        if [ -z "$OMIT_PROXY" ] && check_running $PROXY_CONTAINER_NAME 2>/dev/null ; then
             echo
-            echo "weave proxy is running"
+            echo "       Service: proxy"
+            echo "       Address: $(proxy_addr)"
         fi
         [ $res -eq 0 ]
         ;;
-    ps)
-        [ $# -eq 0 ] && CONTAINERS="weave:expose $(docker ps -q)" || CONTAINERS="$@"
-        with_container_addresses echo_addresses $CONTAINERS
-        ;;
-    version)
-        [ $# -eq 0 ] || usage
-        echo weave script $SCRIPT_VERSION
-        ask_version $CONTAINER_NAME $IMAGE || true
-        if ! EXEC_IMAGE_ID=$(docker inspect --format='{{.Id}}' $EXEC_IMAGE 2>/dev/null) ; then
-            echo "Unable to find $EXEC_IMAGE image." >&2
+    report)
+        if [ $# -gt 0 ] ; then
+            [ $# -eq 2 -a "$1" = "-f" ] || usage
+            call_weave GET /report --get --data-urlencode "format=$2"
         else
-            EXEC_VERSION=$(docker images --no-trunc | grep $EXEC_IMAGE_ID | grep -v latest | tr -s ' ' | cut -d ' ' -f 2 | tr "\n" ' ')
-            if [ -n "$EXEC_VERSION" ] ; then
-                echo "weave exec $EXEC_VERSION"
-            else
-                echo "weave exec (unreleased version)"
-            fi
+            call_weave GET /report -H 'Accept: application/json'
         fi
         ;;
     run)
@@ -1307,7 +1352,7 @@ case "$COMMAND" in
         shift $(dns_arg_count "$@")
         collect_cidr_args "$@"
         shift $CIDR_ARG_COUNT
-        CONTAINER=$(docker run $DNS_ARGS -d "$@")
+        CONTAINER=$(docker run -e WEAVE_CIDR=none $DNS_ARGS -d "$@")
         create_bridge
         ipam_cidrs_or_die $CONTAINER $CIDR_ARGS
         with_container_netns_or_die $CONTAINER attach $ALL_CIDRS
@@ -1432,6 +1477,10 @@ case "$COMMAND" in
             call_weave DELETE /ip/weave:expose/${CIDR%/*}
         done
         show_addrs $ALL_CIDRS
+        ;;
+    ps)
+        [ $# -eq 0 ] && CONTAINERS="weave:expose $(docker ps -q)" || CONTAINERS="$@"
+        with_container_addresses echo_addresses $CONTAINERS
         ;;
     stop)
         [ $# -eq 0 ] || usage

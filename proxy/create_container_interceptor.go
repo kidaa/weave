@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -16,6 +17,10 @@ import (
 )
 
 const MaxDockerHostname = 64
+
+var (
+	ErrNoCommandSpecified = errors.New("No command specified")
+)
 
 type createContainerInterceptor struct{ proxy *Proxy }
 
@@ -49,16 +54,16 @@ func (i *createContainerInterceptor) InterceptRequest(r *http.Request) error {
 	}
 
 	if cidrs, err := i.proxy.weaveCIDRsFromConfig(container.Config, container.HostConfig); err != nil {
-		Log.Infof("Ignoring container due to %s", err)
+		Log.Infof("Leaving container alone because %s", err)
 	} else {
 		Log.Infof("Creating container with WEAVE_CIDR \"%s\"", strings.Join(cidrs, " "))
 		if container.HostConfig == nil {
 			container.HostConfig = &docker.HostConfig{}
 		}
-		container.HostConfig.VolumesFrom = append(container.HostConfig.VolumesFrom, "weaveproxy:ro")
 		if container.Config == nil {
 			container.Config = &docker.Config{}
 		}
+		i.addWeaveWaitVolume(container.HostConfig)
 		if err := i.setWeaveWaitEntrypoint(container.Config); err != nil {
 			return err
 		}
@@ -79,6 +84,18 @@ func (i *createContainerInterceptor) InterceptRequest(r *http.Request) error {
 	return nil
 }
 
+func (i *createContainerInterceptor) addWeaveWaitVolume(hostConfig *docker.HostConfig) {
+	var binds []string
+	for _, bind := range hostConfig.Binds {
+		s := strings.Split(bind, ":")
+		if len(s) >= 2 && s[1] == "/w" {
+			continue
+		}
+		binds = append(binds, bind)
+	}
+	hostConfig.Binds = append(binds, fmt.Sprintf("%s:/w:ro", i.proxy.weaveWaitVolume))
+}
+
 func (i *createContainerInterceptor) setWeaveWaitEntrypoint(container *docker.Config) error {
 	if len(container.Entrypoint) == 0 {
 		image, err := i.proxy.client.InspectImage(container.Image)
@@ -97,12 +114,12 @@ func (i *createContainerInterceptor) setWeaveWaitEntrypoint(container *docker.Co
 		}
 	}
 
+	if len(container.Entrypoint) == 0 && len(container.Cmd) == 0 {
+		return ErrNoCommandSpecified
+	}
+
 	if len(container.Entrypoint) == 0 || container.Entrypoint[0] != weaveWaitEntrypoint[0] {
-		entrypoint := weaveWaitEntrypoint
-		if i.proxy.NoRewriteHosts {
-			entrypoint = append(entrypoint, "-h")
-		}
-		container.Entrypoint = append(entrypoint, container.Entrypoint...)
+		container.Entrypoint = append(weaveWaitEntrypoint, container.Entrypoint...)
 	}
 
 	return nil

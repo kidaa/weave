@@ -57,7 +57,7 @@ func main() {
 		peers              []string
 		noDNS              bool
 		dnsDomain          string
-		dnsPort            int
+		dnsListenAddress   string
 		dnsTTL             int
 		dnsClientTimeout   time.Duration
 	)
@@ -83,7 +83,7 @@ func main() {
 	mflag.StringVar(&apiPath, []string{"#api", "-api"}, "unix:///var/run/docker.sock", "Path to Docker API socket")
 	mflag.BoolVar(&noDNS, []string{"-no-dns"}, false, "disable DNS server")
 	mflag.StringVar(&dnsDomain, []string{"-dns-domain"}, nameserver.DefaultDomain, "local domain to server requests for")
-	mflag.IntVar(&dnsPort, []string{"-dns-port"}, nameserver.DefaultPort, "port to listen on for DNS requests")
+	mflag.StringVar(&dnsListenAddress, []string{"-dns-listen-address"}, nameserver.DefaultListenAddress, "address to listen on for DNS requests")
 	mflag.IntVar(&dnsTTL, []string{"-dns-ttl"}, nameserver.DefaultTTL, "TTL for DNS request from our domain")
 	mflag.DurationVar(&dnsClientTimeout, []string{"-dns-fallback-timeout"}, nameserver.DefaultClientTimeout, "timeout for fallback DNS requests")
 
@@ -183,7 +183,7 @@ func main() {
 		}
 		ns.Start()
 		defer ns.Stop()
-		dnsserver, err = nameserver.NewDNSServer(ns, dnsDomain, dnsPort, uint32(dnsTTL), dnsClientTimeout)
+		dnsserver, err = nameserver.NewDNSServer(ns, dnsDomain, dnsListenAddress, uint32(dnsTTL), dnsClientTimeout)
 		if err != nil {
 			Log.Fatal("Unable to start dns server: ", err)
 		}
@@ -193,25 +193,27 @@ func main() {
 
 	router.Start()
 	if errors := router.ConnectionMaker.InitiateConnections(peers, false); len(errors) > 0 {
-		Log.Fatal(errorMessages(errors))
+		Log.Fatal(ErrorMessages(errors))
 	}
 
 	// The weave script always waits for a status call to succeed,
 	// so there is no point in doing "weave launch --http-addr ''".
 	// This is here to support stand-alone use of weaver.
 	if httpAddr != "" {
-		go handleHTTP(router, httpAddr, allocator, defaultSubnet, dockerCli, ns, dnsserver)
+		muxRouter := mux.NewRouter()
+		if allocator != nil {
+			allocator.HandleHTTP(muxRouter, defaultSubnet, dockerCli)
+		}
+		if ns != nil {
+			ns.HandleHTTP(muxRouter)
+		}
+		router.HandleHTTP(muxRouter)
+		HandleHTTP(muxRouter, version, router, allocator, defaultSubnet, ns, dnsserver)
+		http.Handle("/", muxRouter)
+		go listenAndServeHTTP(httpAddr, muxRouter)
 	}
 
 	SignalHandlerLoop(router)
-}
-
-func errorMessages(errors []error) string {
-	var result []string
-	for _, err := range errors {
-		result = append(result, err.Error())
-	}
-	return strings.Join(result, "\n")
 }
 
 func options() map[string]string {
@@ -304,57 +306,7 @@ func determineQuorum(initPeerCountFlag int, peers []string) uint {
 	return quorum
 }
 
-func handleHTTP(router *weave.Router, httpAddr string, allocator *ipam.Allocator, defaultSubnet address.CIDR, docker *docker.Client, ns *nameserver.Nameserver, dnsserver *nameserver.DNSServer) {
-	muxRouter := mux.NewRouter()
-
-	if allocator != nil {
-		allocator.HandleHTTP(muxRouter, defaultSubnet, docker)
-	}
-
-	if ns != nil {
-		ns.HandleHTTP(muxRouter)
-	}
-
-	muxRouter.Methods("GET").Path("/status").Headers("Accept", "application/json").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json, _ := router.StatusJSON(version)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(json)
-	})
-
-	muxRouter.Methods("GET").Path("/status").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "weave router", version)
-		fmt.Fprintln(w, router.Status())
-		if allocator != nil {
-			fmt.Fprintln(w, allocator.String())
-			fmt.Fprintln(w, "Allocator default subnet:", defaultSubnet)
-		}
-		fmt.Fprintln(w, "")
-		if dnsserver == nil {
-			fmt.Fprintln(w, "WeaveDNS is disabled")
-		} else {
-			fmt.Fprintln(w, dnsserver.String())
-			fmt.Fprintln(w, ns.String())
-		}
-	})
-
-	muxRouter.Methods("POST").Path("/connect").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, fmt.Sprint("unable to parse form: ", err), http.StatusBadRequest)
-		}
-		if errors := router.ConnectionMaker.InitiateConnections(r.Form["peer"], r.FormValue("replace") == "true"); len(errors) > 0 {
-			http.Error(w, errorMessages(errors), http.StatusBadRequest)
-		}
-	})
-
-	muxRouter.Methods("POST").Path("/forget").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, fmt.Sprint("unable to parse form: ", err), http.StatusBadRequest)
-		}
-		router.ConnectionMaker.ForgetConnections(r.Form["peer"])
-	})
-
-	http.Handle("/", muxRouter)
-
+func listenAndServeHTTP(httpAddr string, muxRouter *mux.Router) {
 	protocol := "tcp"
 	if strings.HasPrefix(httpAddr, "/") {
 		os.Remove(httpAddr) // in case it's there from last time
@@ -364,7 +316,6 @@ func handleHTTP(router *weave.Router, httpAddr string, allocator *ipam.Allocator
 	if err != nil {
 		Log.Fatal("Unable to create http listener socket: ", err)
 	}
-
 	err = http.Serve(l, nil)
 	if err != nil {
 		Log.Fatal("Unable to create http server", err)

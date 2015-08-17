@@ -117,8 +117,10 @@ stop_router_on() {
     # the weave container, which means we a) can't grab coverage
     # stats, and b) can't inspect the logs when tests fail.
     docker_on $host stop weave 1>/dev/null 2>&1 || true
+    docker_on $host stop weaveproxy 1>/dev/null 2>&1 || true
     if [ -n "$COVERAGE" ] ; then
-        collect_coverage $host
+        collect_coverage $host weave
+        collect_coverage $host weaveproxy
     fi
 }
 
@@ -139,6 +141,18 @@ start_container_with_dns() {
     host=$1
     shift 1
     weave_on $host run --with-dns "$@" -t $DNS_IMAGE /bin/sh
+}
+
+proxy_start_container() {
+    host=$1
+    shift 1
+    proxy docker_on $host run "$@" -dt $SMALL_IMAGE /bin/sh
+}
+
+proxy_start_container_with_dns() {
+    host=$1
+    shift 1
+    proxy docker_on $host run "$@" -dt $DNS_IMAGE /bin/sh
 }
 
 rm_containers() {
@@ -207,11 +221,12 @@ end_suite() {
 
 collect_coverage() {
     host=$1
+    container=$2
     mkdir -p ./coverage
-    rm -f cover.router.prof
-    docker_on $host cp weave:/home/weave/cover.router.prof . 2>/dev/null || return 0
+    rm -f cover.prof
+    docker_on $host cp $container:/home/weave/cover.prof . 2>/dev/null || return 0
     # ideally we'd know the name of the test here, and put that in the filename
-    mv cover.router.prof $(mktemp -u ./coverage/integration.XXXXXXXX) || true
+    mv cover.prof $(mktemp -u ./coverage/integration.XXXXXXXX) || true
 }
 
 WEAVE=$DIR/../weave

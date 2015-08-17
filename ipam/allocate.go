@@ -35,6 +35,8 @@ func (g *allocate) Try(alloc *Allocator) bool {
 		return true
 	}
 
+	alloc.establishRing()
+
 	if ok, addr := alloc.space.Allocate(g.r); ok {
 		alloc.debugln("Allocated", addr, "for", g.ident, "in", g.r)
 		alloc.addOwned(g.ident, addr)
@@ -58,10 +60,6 @@ func (g *allocate) Try(alloc *Allocator) bool {
 
 func (g *allocate) Cancel() {
 	g.resultChan <- allocateResult{0, fmt.Errorf("Allocate request for %s cancelled", g.ident)}
-}
-
-func (g *allocate) String() string {
-	return fmt.Sprintf("Allocate for %s", g.ident)
 }
 
 func (g *allocate) ForContainer(ident string) bool {
